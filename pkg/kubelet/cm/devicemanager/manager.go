@@ -118,11 +118,13 @@ func NewManagerImpl(topology []cadvisorapi.Node, topologyAffinityStore topologym
 	if runtime.GOOS == "windows" {
 		socketPath = os.Getenv("SYSTEMDRIVE") + pluginapi.KubeletSocketWindows
 	}
-	return newManagerImpl(socketPath, topology, topologyAffinityStore)
+	pluginSocketDir, _ := filepath.Split(socketPath)
+	pluginSocketDir = filepath.Join(pluginSocketDir, "plugins")
+	return newManagerImpl(socketPath, pluginSocketDir, topology, topologyAffinityStore)
 }
 
-func newManagerImpl(socketPath string, topology []cadvisorapi.Node, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
-	klog.V(2).InfoS("Creating Device Plugin manager", "path", socketPath)
+func newManagerImpl(socketPath string, pluginSocketDir string, topology []cadvisorapi.Node, topologyAffinityStore topologymanager.Store) (*ManagerImpl, error) {
+	klog.V(2).InfoS("Creating Device Plugin manager", "socketPath", socketPath, "pluginSocketDir", pluginSocketDir)
 
 	var numaNodes []int
 	for _, node := range topology {
@@ -142,7 +144,7 @@ func newManagerImpl(socketPath string, topology []cadvisorapi.Node, topologyAffi
 		devicesToReuse:        make(PodReusableDevices),
 	}
 
-	server, err := plugin.NewServer(socketPath, manager, manager)
+	server, err := plugin.NewServer(socketPath, pluginSocketDir, manager, manager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin server: %v", err)
 	}

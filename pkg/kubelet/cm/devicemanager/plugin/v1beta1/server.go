@@ -45,31 +45,37 @@ type Server interface {
 }
 
 type server struct {
-	socketName string
-	socketDir  string
-	mutex      sync.Mutex
-	wg         sync.WaitGroup
-	grpc       *grpc.Server
-	rhandler   RegistrationHandler
-	chandler   ClientHandler
-	clients    map[string]Client
+	socketName      string
+	socketDir       string
+	pluginSocketDir string
+	mutex           sync.Mutex
+	wg              sync.WaitGroup
+	grpc            *grpc.Server
+	rhandler        RegistrationHandler
+	chandler        ClientHandler
+	clients         map[string]Client
 }
 
 // NewServer returns an initialized device plugin registration server.
-func NewServer(socketPath string, rh RegistrationHandler, ch ClientHandler) (Server, error) {
+func NewServer(socketPath string, pluginSocketDir string, rh RegistrationHandler, ch ClientHandler) (Server, error) {
 	if socketPath == "" || !filepath.IsAbs(socketPath) {
 		return nil, fmt.Errorf(errBadSocket+" %s", socketPath)
 	}
 
+	if pluginSocketDir == "" || !filepath.IsAbs(pluginSocketDir) {
+		return nil, fmt.Errorf(errBadPluginSocket+" %s", pluginSocketDir)
+	}
+
 	dir, name := filepath.Split(socketPath)
 
-	klog.V(2).InfoS("Creating device plugin registration server", "version", api.Version, "socket", socketPath)
+	klog.V(2).InfoS("Creating device plugin registration server", "version", api.Version, "socketPath", socketPath, "pluginSocketDir", pluginSocketDir)
 	s := &server{
-		socketName: name,
-		socketDir:  dir,
-		rhandler:   rh,
-		chandler:   ch,
-		clients:    make(map[string]Client),
+		socketName:      name,
+		socketDir:       dir,
+		pluginSocketDir: pluginSocketDir,
+		rhandler:        rh,
+		chandler:        ch,
+		clients:         make(map[string]Client),
 	}
 
 	return s, nil
@@ -79,7 +85,12 @@ func (s *server) Start() error {
 	klog.V(2).InfoS("Starting device plugin registration server")
 
 	if err := os.MkdirAll(s.socketDir, 0750); err != nil {
-		klog.ErrorS(err, "Failed to create the device plugin socket directory", "directory", s.socketDir)
+		klog.ErrorS(err, "Failed to create the socket directory", "directory", s.socketDir)
+		return err
+	}
+
+	if err := os.MkdirAll(s.pluginSocketDir, 0750); err != nil {
+		klog.ErrorS(err, "Failed to create the device plugin socket directory", "directory", s.pluginSocketDir)
 		return err
 	}
 
@@ -87,13 +98,22 @@ func (s *server) Start() error {
 		if err := selinux.SetFileLabel(s.socketDir, config.KubeletPluginsDirSELinuxLabel); err != nil {
 			klog.InfoS("Unprivileged containerized plugins might not work. Could not set selinux context on socket dir", "path", s.socketDir, "err", err)
 		}
+
+		if err := selinux.SetFileLabel(s.pluginSocketDir, config.KubeletPluginsDirSELinuxLabel); err != nil {
+			klog.InfoS("Unprivileged containerized plugins might not work. Could not set selinux context on plugin socket dir", "path", s.pluginSocketDir, "err", err)
+		}
 	}
 
 	// For now we leave cleanup of the *entire* directory up to the Handler
 	// (even though we should in theory be able to just wipe the whole directory)
 	// because the Handler stores its checkpoint file (amongst others) in here.
 	if err := s.rhandler.CleanupPluginDirectory(s.socketDir); err != nil {
-		klog.ErrorS(err, "Failed to cleanup the device plugin directory", "directory", s.socketDir)
+		klog.ErrorS(err, "Failed to cleanup the socket directory", "directory", s.socketDir)
+		return err
+	}
+
+	if err := s.rhandler.CleanupPluginDirectory(s.pluginSocketDir); err != nil {
+		klog.ErrorS(err, "Failed to cleanup the device plugin directory", "directory", s.pluginSocketDir)
 		return err
 	}
 
@@ -156,7 +176,7 @@ func (s *server) Register(ctx context.Context, r *api.RegisterRequest) (*api.Emp
 		return &api.Empty{}, err
 	}
 
-	if err := s.connectClient(r.ResourceName, filepath.Join(s.socketDir, r.Endpoint)); err != nil {
+	if err := s.connectClient(r.ResourceName, filepath.Join(s.pluginSocketDir, r.Endpoint)); err != nil {
 		klog.InfoS("Error connecting to device plugin client", "err", err)
 		return &api.Empty{}, err
 	}

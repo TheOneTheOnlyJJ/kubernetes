@@ -52,20 +52,22 @@ const (
 	testResourceName = "fake-domain/resource"
 )
 
-func newWrappedManagerImpl(socketPath string, manager *ManagerImpl) *wrappedManagerImpl {
+func newWrappedManagerImpl(socketPath string, pluginSocketDir string, manager *ManagerImpl) *wrappedManagerImpl {
 	w := &wrappedManagerImpl{
-		ManagerImpl: manager,
-		callback:    manager.genericDeviceUpdateCallback,
+		ManagerImpl:     manager,
+		pluginSocketDir: pluginSocketDir,
+		callback:        manager.genericDeviceUpdateCallback,
 	}
 	w.socketdir, _ = filepath.Split(socketPath)
-	w.server, _ = plugin.NewServer(socketPath, w, w)
+	w.server, _ = plugin.NewServer(socketPath, pluginSocketDir, w, w)
 	return w
 }
 
 type wrappedManagerImpl struct {
 	*ManagerImpl
-	socketdir string
-	callback  func(string, []pluginapi.Device)
+	socketdir       string
+	pluginSocketDir string
+	callback        func(string, []pluginapi.Device)
 }
 
 func (m *wrappedManagerImpl) PluginListAndWatchReceiver(r string, resp *pluginapi.ListAndWatchResponse) {
@@ -76,42 +78,43 @@ func (m *wrappedManagerImpl) PluginListAndWatchReceiver(r string, resp *pluginap
 	m.callback(r, devices)
 }
 
-func tmpSocketDir() (socketDir, socketName, pluginSocketName string, err error) {
+func tmpSocketDir() (socketDir, socketName, pluginSocketDir, pluginSocketName string, err error) {
 	socketDir, err = os.MkdirTemp("", "device_plugin")
 	if err != nil {
 		return
 	}
 	socketName = filepath.Join(socketDir, "server.sock")
-	pluginSocketName = filepath.Join(socketDir, "device-plugin.sock")
-	os.MkdirAll(socketDir, 0755)
+	pluginSocketDir = filepath.Join(socketDir, "plugins")
+	pluginSocketName = filepath.Join(pluginSocketDir, "device-plugin.sock")
+	err = os.MkdirAll(pluginSocketDir, 0755)
 	return
 }
 
 func TestNewManagerImpl(t *testing.T) {
-	socketDir, socketName, _, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, _, err := tmpSocketDir()
 	topologyStore := topologymanager.NewFakeManager()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	_, err = newManagerImpl(socketName, nil, topologyStore)
+	_, err = newManagerImpl(socketName, pluginSocketDir, nil, topologyStore)
 	require.NoError(t, err)
 	os.RemoveAll(socketDir)
 }
 
 func TestNewManagerImplStart(t *testing.T) {
-	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, pluginSocketName, err := tmpSocketDir()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	m, _, p := setup(t, []*pluginapi.Device{}, func(n string, d []pluginapi.Device) {}, socketName, pluginSocketName)
+	m, _, p := setup(t, []*pluginapi.Device{}, func(n string, d []pluginapi.Device) {}, socketName, pluginSocketDir, pluginSocketName)
 	cleanup(t, m, p)
 	// Stop should tolerate being called more than once.
 	cleanup(t, m, p)
 }
 
 func TestNewManagerImplStartProbeMode(t *testing.T) {
-	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, pluginSocketName, err := tmpSocketDir()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	m, _, p, _ := setupInProbeMode(t, []*pluginapi.Device{}, func(n string, d []pluginapi.Device) {}, socketName, pluginSocketName)
+	m, _, p, _ := setupInProbeMode(t, []*pluginapi.Device{}, func(n string, d []pluginapi.Device) {}, socketName, pluginSocketDir, pluginSocketName)
 	cleanup(t, m, p)
 }
 
@@ -119,7 +122,7 @@ func TestNewManagerImplStartProbeMode(t *testing.T) {
 // making sure that after registration, devices are correctly updated and if a re-registration
 // happens, we will NOT delete devices; and no orphaned devices left.
 func TestDevicePluginReRegistration(t *testing.T) {
-	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, pluginSocketName, err := tmpSocketDir()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
 	devs := []*pluginapi.Device{
@@ -131,7 +134,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	}
 	for _, preStartContainerFlag := range []bool{false, true} {
 		for _, getPreferredAllocationFlag := range []bool{false, true} {
-			m, ch, p1 := setup(t, devs, nil, socketName, pluginSocketName)
+			m, ch, p1 := setup(t, devs, nil, socketName, pluginSocketDir, pluginSocketName)
 			p1.Register(socketName, testResourceName, "")
 
 			select {
@@ -190,7 +193,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 // While testing above scenario, plugin discovery and registration will be done using
 // Kubelet probe based mechanism
 func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
-	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, pluginSocketName, err := tmpSocketDir()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
 	devs := []*pluginapi.Device{
@@ -201,7 +204,7 @@ func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
 		{ID: "Dev3", Health: pluginapi.Healthy},
 	}
 
-	m, ch, p1, _ := setupInProbeMode(t, devs, nil, socketName, pluginSocketName)
+	m, ch, p1, _ := setupInProbeMode(t, devs, nil, socketName, pluginSocketDir, pluginSocketName)
 
 	// Wait for the first callback to be issued.
 	select {
@@ -252,13 +255,13 @@ func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
 	cleanup(t, m, p1)
 }
 
-func setupDeviceManager(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string) (Manager, <-chan interface{}) {
+func setupDeviceManager(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketDir string) (Manager, <-chan interface{}) {
 	topologyStore := topologymanager.NewFakeManager()
-	m, err := newManagerImpl(socketName, nil, topologyStore)
+	m, err := newManagerImpl(socketName, pluginSocketDir, nil, topologyStore)
 	require.NoError(t, err)
 	updateChan := make(chan interface{})
 
-	w := newWrappedManagerImpl(socketName, m)
+	w := newWrappedManagerImpl(socketName, pluginSocketDir, m)
 	if callback != nil {
 		w.callback = callback
 	}
@@ -301,14 +304,14 @@ func runPluginManager(pluginManager pluginmanager.PluginManager) {
 	go pluginManager.Run(sourcesReady, wait.NeverStop)
 }
 
-func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub) {
-	m, updateChan := setupDeviceManager(t, devs, callback, socketName)
+func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketDir string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub) {
+	m, updateChan := setupDeviceManager(t, devs, callback, socketName, pluginSocketDir)
 	p := setupDevicePlugin(t, devs, pluginSocketName)
 	return m, updateChan, p
 }
 
-func setupInProbeMode(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub, pluginmanager.PluginManager) {
-	m, updateChan := setupDeviceManager(t, devs, callback, socketName)
+func setupInProbeMode(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketDir string, pluginSocketName string) (Manager, <-chan interface{}, *plugin.Stub, pluginmanager.PluginManager) {
+	m, updateChan := setupDeviceManager(t, devs, callback, socketName, pluginSocketDir)
 	p := setupDevicePlugin(t, devs, pluginSocketName)
 	pm := setupPluginManager(t, pluginSocketName, m)
 	return m, updateChan, p, pm
@@ -320,11 +323,11 @@ func cleanup(t *testing.T, m Manager, p *plugin.Stub) {
 }
 
 func TestUpdateCapacityAllocatable(t *testing.T) {
-	socketDir, socketName, _, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, pluginSocketName, err := tmpSocketDir()
 	topologyStore := topologymanager.NewFakeManager()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	testManager, err := newManagerImpl(socketName, nil, topologyStore)
+	testManager, err := newManagerImpl(socketName, pluginSocketDir, nil, topologyStore)
 	as := assert.New(t)
 	as.NotNil(testManager)
 	as.Nil(err)
@@ -390,7 +393,7 @@ func TestUpdateCapacityAllocatable(t *testing.T) {
 	// Tests adding another resource.
 	resourceName2 := "resource2"
 	e2 := &endpointImpl{}
-	e2.client = plugin.NewPluginClient(resourceName2, socketName, testManager)
+	e2.client = plugin.NewPluginClient(resourceName2, pluginSocketName, testManager)
 	testManager.endpoints[resourceName2] = endpointInfo{e: e2, opts: nil}
 	callback(resourceName2, devs)
 	capacity, allocatable, removedResources = testManager.GetCapacity()
@@ -462,11 +465,11 @@ func TestUpdateCapacityAllocatable(t *testing.T) {
 }
 
 func TestGetAllocatableDevicesMultipleResources(t *testing.T) {
-	socketDir, socketName, _, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, _, err := tmpSocketDir()
 	topologyStore := topologymanager.NewFakeManager()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	testManager, err := newManagerImpl(socketName, nil, topologyStore)
+	testManager, err := newManagerImpl(socketName, pluginSocketDir, nil, topologyStore)
 	as := assert.New(t)
 	as.NotNil(testManager)
 	as.Nil(err)
@@ -503,11 +506,11 @@ func TestGetAllocatableDevicesMultipleResources(t *testing.T) {
 }
 
 func TestGetAllocatableDevicesHealthTransition(t *testing.T) {
-	socketDir, socketName, _, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, _, err := tmpSocketDir()
 	topologyStore := topologymanager.NewFakeManager()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
-	testManager, err := newManagerImpl(socketName, nil, topologyStore)
+	testManager, err := newManagerImpl(socketName, pluginSocketDir, nil, topologyStore)
 	as := assert.New(t)
 	as.NotNil(testManager)
 	as.Nil(err)
@@ -1387,7 +1390,7 @@ const deviceManagerCheckpointFilename = "kubelet_internal_checkpoint"
 var oldCheckpoint string = `{"Data":{"PodDeviceEntries":[{"PodUID":"13ac2284-0d19-44b7-b94f-055b032dba9b","ContainerName":"centos","ResourceName":"example.com/deviceA","DeviceIDs":["DevA3"],"AllocResp":"CiIKHUVYQU1QTEVDT01ERVZJQ0VBX0RFVkEzX1RUWTEwEgEwGhwKCi9kZXYvdHR5MTASCi9kZXYvdHR5MTAaAnJ3"},{"PodUID":"86b9a017-c9ca-4069-815f-46ca3e53c1e4","ContainerName":"centos","ResourceName":"example.com/deviceA","DeviceIDs":["DevA4"],"AllocResp":"CiIKHUVYQU1QTEVDT01ERVZJQ0VBX0RFVkE0X1RUWTExEgEwGhwKCi9kZXYvdHR5MTESCi9kZXYvdHR5MTEaAnJ3"}],"RegisteredDevices":{"example.com/deviceA":["DevA1","DevA2","DevA3","DevA4"]}},"Checksum":405612085}`
 
 func TestReadPreNUMACheckpoint(t *testing.T) {
-	socketDir, socketName, _, err := tmpSocketDir()
+	socketDir, socketName, pluginSocketDir, _, err := tmpSocketDir()
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
 
@@ -1396,7 +1399,7 @@ func TestReadPreNUMACheckpoint(t *testing.T) {
 
 	topologyStore := topologymanager.NewFakeManager()
 	nodes := []cadvisorapi.Node{{Id: 0}}
-	m, err := newManagerImpl(socketName, nodes, topologyStore)
+	m, err := newManagerImpl(socketName, pluginSocketDir, nodes, topologyStore)
 	require.NoError(t, err)
 
 	// TODO: we should not calling private methods, but among the existing tests we do anyway

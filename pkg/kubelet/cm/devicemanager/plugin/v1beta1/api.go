@@ -46,4 +46,6 @@ const (
 	errInvalidResourceName = "the ResourceName %q is invalid"
 	// errBadSocket is the error raised when the registry socket path is not absolute
 	errBadSocket = "bad socketPath, must be an absolute path:"
+	// errBadPluginSocket is the error raised when the plugin socket path is not absolute
+	errBadPluginSocket = "bad pluginSocketDir, must be an absolute path:"
 )
