@@ -40,7 +40,7 @@ const (
 
 	// Accounts
 	EVERYONE = "Everyone"
-	USER     = "User"
+	USERS    = "Users"
 	NONE     = "None"
 
 	// Well-known SID Strings
@@ -101,7 +101,7 @@ func fileMode(path string) error {
 		return nil
 	}
 
-	fMode, err := getFileModeWindows(path)
+	fMode, err := getFileMode(path)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func filePerm(path string) error {
 		return nil
 	}
 
-	fMode, err := getFileModeWindows(path)
+	fMode, err := getFileMode(path)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func filePerm(path string) error {
 	return nil
 }
 
-func getFileModeWindows(path string) (os.FileMode, error) {
+func getFileMode(path string) (os.FileMode, error) {
 	var (
 		daclHandle, secDesc windows.Handle
 		owner, group        *windows.SID
@@ -144,6 +144,8 @@ func getFileModeWindows(path string) (os.FileMode, error) {
 		return 0, err
 	}
 
+	fmt.Printf("Owner = %s\nGroup = %s\n", owner.String(), group.String())
+
 	defer windows.LocalFree(secDesc)
 
 	dacl := (*ACL)(unsafe.Pointer(daclHandle))
@@ -154,11 +156,14 @@ func getFileModeWindows(path string) (os.FileMode, error) {
 
 	allowMode := 0
 	denyMode := 0
+	fmt.Printf("----- Enter for loop -----\n")
 	for _, ace := range aces {
+		fmt.Printf("Read ACE SID = %s\n", ace.sid.String())
 		accountName, _, _, err := ace.sid.LookupAccount("")
 		if err != nil {
 			return 0, err
 		}
+		fmt.Printf("Account Name = %s\n", accountName)
 
 		// LookupAccount may return an empty string.
 		if accountName == "" {
@@ -182,8 +187,9 @@ func getFileModeWindows(path string) (os.FileMode, error) {
 		}
 		if group.Equals(&ace.sid) {
 			mode |= perms << 3
+			fmt.Printf("Group SID matched!\n")
 		}
-		if accountName == EVERYONE || accountName == USER {
+		if accountName == EVERYONE || accountName == USERS {
 			mode |= perms
 		}
 
@@ -192,7 +198,9 @@ func getFileModeWindows(path string) (os.FileMode, error) {
 		} else if ace.aceType == ACCESS_DENIED_ACE_TYPE {
 			denyMode |= mode
 		}
+		fmt.Printf("Perms = %d\nMode = %d\n", perms, mode)
 	}
+	fmt.Printf("----- Exit for loop -----\n")
 
 	// Exclude the denied permissions.
 	return os.FileMode(allowMode & ^denyMode), nil
