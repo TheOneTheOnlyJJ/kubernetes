@@ -22,6 +22,7 @@ package mounttest
 import (
 	"fmt"
 	"os"
+	osuser "os/user"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -53,6 +54,20 @@ const (
 	// https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-ace_header
 	ACCESS_ALLOWED_ACE_TYPE = 0
 	ACCESS_DENIED_ACE_TYPE  = 1
+
+	// Values that specify the type of a security identifier (SID)
+	// https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-sid_name_use
+	SidTypeUser           = 1
+	SidTypeGroup          = 2
+	SidTypeDomain         = 3
+	SidTypeAlias          = 4
+	SidTypeWellKnownGroup = 5
+	SidTypeDeletedAccount = 6
+	SidTypeInvalid        = 7
+	SidTypeUnknown        = 8
+	SidTypeComputer       = 9
+	SidTypeLabel          = 10
+	SidTypeLogonSession   = 11
 )
 
 var (
@@ -144,7 +159,58 @@ func getFileMode(path string) (os.FileMode, error) {
 		return 0, err
 	}
 
-	fmt.Printf("Owner = %s\nGroup = %s\n", owner.String(), group.String())
+	fmt.Printf("Owner SID = %s\nGroup SID = %s\n", owner.String(), group.String())
+	ownerAccountName, _, ownerAccountType, err := owner.LookupAccount("")
+	if err != nil {
+		return 0, err
+	}
+	if ownerAccountName == "" {
+		ownerAccountName = NONE
+	}
+	groupAccountName, _, groupAccountType, err := group.LookupAccount("")
+	if err != nil {
+		return 0, err
+	}
+	if groupAccountName == "" {
+		groupAccountName = NONE
+	}
+	fmt.Printf("Owner Account Name = %s\nOwner Account Type = %d\nGroup Account Name = %s\nGroup Account Type = %d\n", ownerAccountName, ownerAccountType, groupAccountName, groupAccountType)
+
+	fmt.Printf("Checking ownerAccountType\n")
+	// If owner account is of user type we have to get the groups which the owner is a member of
+	ownerGroupSids := []*windows.SID{}
+	if ownerAccountType == SidTypeUser {
+		fmt.Printf("ownerAccountType is user\n")
+		fmt.Printf("Before Lookup\n")
+		user, err := osuser.Lookup(ownerAccountName)
+		if err != nil {
+			fmt.Printf("%v\n", err)
+			return 0, err
+		}
+		fmt.Printf("After Lookup\n")
+		fmt.Printf("Before GroupIds\n")
+		ownerGroupSidsStrings, err := user.GroupIds()
+		if err != nil {
+			fmt.Printf("%v\n", err)
+			return 0, err
+		}
+		for _, ownerGroupSidString := range ownerGroupSidsStrings {
+			ownerGroupSid, err := windows.StringToSid(ownerGroupSidString)
+			if err != nil {
+				return 0, err
+			}
+			ownerGroupSids = append(ownerGroupSids, ownerGroupSid)
+		}
+		fmt.Printf("After GroupIds\n")
+
+		fmt.Printf("------------------------------------\n")
+		for _, usid := range ownerGroupSids {
+			fmt.Printf("%s\n", usid.String())
+		}
+		fmt.Printf("------------------------------------\n")
+	} else if ownerAccountType != SidTypeGroup && ownerAccountType != SidTypeWellKnownGroup && ownerAccountType != SidTypeAlias {
+		fmt.Printf("ownerAccountType is NOT user NOR group\n")
+	}
 
 	defer windows.LocalFree(secDesc)
 
@@ -158,17 +224,17 @@ func getFileMode(path string) (os.FileMode, error) {
 	denyMode := 0
 	fmt.Printf("----- Enter for loop -----\n")
 	for _, ace := range aces {
-		fmt.Printf("Read ACE SID = %s\n", ace.sid.String())
+		fmt.Printf("\nRead ACE SID = %s\n", ace.sid.String())
 		accountName, _, _, err := ace.sid.LookupAccount("")
 		if err != nil {
 			return 0, err
 		}
-		fmt.Printf("Account Name = %s\n", accountName)
 
 		// LookupAccount may return an empty string.
 		if accountName == "" {
 			accountName = NONE
 		}
+		fmt.Printf("Account Name = %s\n", accountName)
 
 		perms := 0
 		if (ace.mask & READ_PERMISSIONS) == READ_PERMISSIONS {
@@ -184,13 +250,22 @@ func getFileMode(path string) (os.FileMode, error) {
 		mode := 0
 		if owner.Equals(&ace.sid) {
 			mode = perms << 6
+			fmt.Printf("Owner SID matched!\n")
 		}
-		if group.Equals(&ace.sid) {
+		if group.Equals(&ace.sid) || ownerAccountType == SidTypeAlias || ownerAccountType == SidTypeGroup || ownerAccountType == SidTypeWellKnownGroup {
 			mode |= perms << 3
 			fmt.Printf("Group SID matched!\n")
+		} else {
+			for _, usid := range ownerGroupSids {
+				fmt.Printf("usid = %s\nace sid = %s\n", usid.String(), ace.sid.String())
+				if usid.Equals(&ace.sid) {
+					mode |= perms << 3
+				}
+			}
 		}
 		if accountName == EVERYONE || accountName == USERS {
 			mode |= perms
+			fmt.Printf("Others SID matched!\n")
 		}
 
 		if ace.aceType == ACCESS_ALLOWED_ACE_TYPE {
